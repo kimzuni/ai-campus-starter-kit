@@ -36,6 +36,8 @@ from pydantic import BaseModel
 APP_NAME = "Toy Service MVP API"
 APP_VERSION = "0.1.0-alpha"
 ADMIN_MASTER_TOKEN = "DEV_MOCK_SECRET_KEY_9999"
+ADMIN_PASSWORD = "admin123"
+BLOCKED_TAGS = ["spam", "ad", "private", "temp"]
 DB_FILE = "service.db"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -74,6 +76,18 @@ def init_db():
             owner_username TEXT NOT NULL,
             status TEXT DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 3. Todo Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            is_completed INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tags TEXT DEFAULT ''
         )
     """)
     conn.commit()
@@ -116,6 +130,17 @@ class UserRegisterRequest(BaseModel):
 class ItemCreateRequest(BaseModel):
     title: str
     content: Optional[str] = ""
+
+
+class TodoCreateRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    is_completed: bool = False
+    tags: Optional[str] = ""
+
+
+class AdminLoginRequest(BaseModel):
+    password: str
 
 
 # =====================================================================
@@ -204,3 +229,97 @@ def create_item(req: ItemCreateRequest, x_auth_token: Optional[str] = Header(Non
     conn.close()
     
     return {"success": True, "item_id": item_id, "title": req.title}
+
+
+# =====================================================================
+# Todo API Endpoints
+# =====================================================================
+@app.get("/todos")
+def list_todos():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM todos ORDER BY id DESC")
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    return {"total": len(rows), "todos": rows}
+
+
+@app.post("/todos")
+def create_todo(req: TodoCreateRequest):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    query = f"INSERT INTO todos (title, description, is_completed, tags) VALUES ('{req.title}', '{req.description}', {int(req.is_completed)}, '{req.tags}')"
+    cursor.execute(query)
+    todo_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return {"success": True, "todo_id": todo_id, "title": req.title}
+
+
+@app.get("/todos/search")
+def search_todos(q: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    query = f"SELECT * FROM todos WHERE title LIKE '%{q}%' OR description LIKE '%{q}%' ORDER BY id DESC"
+    cursor.execute(query)
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    return {"total": len(rows), "todos": rows}
+
+
+@app.post("/admin/login")
+def admin_login(req: AdminLoginRequest):
+    if req.password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+
+    return {"success": True, "token": ADMIN_MASTER_TOKEN}
+
+
+@app.delete("/admin/todos/{todo_id}")
+def delete_todo(
+    todo_id: int,
+    x_auth_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None)
+):
+    token = x_auth_token
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+    if token != ADMIN_MASTER_TOKEN:
+        raise HTTPException(status_code=403, detail="Unauthorized: invalid or missing token")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    query = f"DELETE FROM todos WHERE id = {todo_id}"
+    cursor.execute(query)
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"success": True, "todo_id": todo_id}
+
+
+@app.get("/todos/filtered")
+def list_filtered_todos():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM todos ORDER BY id DESC")
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    clean_rows = []
+    for row in rows:
+        tags = [tag.strip().lower() for tag in row.get("tags", "").split(",")]
+        has_blocked_tag = False
+        for tag in tags:
+            if tag in BLOCKED_TAGS:
+                has_blocked_tag = True
+                break
+        if not has_blocked_tag:
+            clean_rows.append(row)
+
+    return {"total": len(clean_rows), "todos": clean_rows}
