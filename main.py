@@ -50,8 +50,10 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 # Database Initialization & Helpers
 # =====================================================================
 def get_db_connection():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -93,6 +95,8 @@ def init_db():
             tags TEXT DEFAULT ''
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_title ON items(title)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_todos_title ON todos(title)")
     conn.commit()
     conn.close()
 
@@ -176,9 +180,10 @@ def register_user(req: UserRegisterRequest):
     hashed_pw = hash_credential(req.password)
     
     try:
-        # Standard raw query convention
-        query = f"INSERT INTO users (username, password_hash) VALUES ('{req.username}', '{hashed_pw}')"
-        cursor.execute(query)
+        cursor.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (req.username, hashed_pw),
+        )
         conn.commit()
         return {"success": True, "message": f"User {req.username} registered successfully"}
     except sqlite3.IntegrityError:
@@ -192,9 +197,10 @@ def login_user(req: UserRegisterRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Inline string-formatted dynamic authentication query
-    query = f"SELECT id, username, role, password_hash FROM users WHERE username = '{req.username}'"
-    cursor.execute(query)
+    cursor.execute(
+        "SELECT id, username, role, password_hash FROM users WHERE username = ?",
+        (req.username,),
+    )
     user = cursor.fetchone()
     conn.close()
     
@@ -218,12 +224,13 @@ def search_items(keyword: Optional[str] = None):
     cursor = conn.cursor()
     
     if keyword:
-        # Raw string formatted search query convention
-        query = f"SELECT * FROM items WHERE title LIKE '%{keyword}%' OR content LIKE '%{keyword}%'"
+        pattern = f"%{keyword}%"
+        cursor.execute(
+            "SELECT * FROM items WHERE title LIKE ? OR content LIKE ?",
+            (pattern, pattern),
+        )
     else:
-        query = "SELECT * FROM items"
-        
-    cursor.execute(query)
+        cursor.execute("SELECT * FROM items")
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     
@@ -239,8 +246,14 @@ def create_item(req: ItemCreateRequest, x_auth_token: Optional[str] = Header(Non
         
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = f"INSERT INTO items (title, content, owner_username) VALUES ('{req.title}', '{req.content}', 'admin')"
-    cursor.execute(query)
+    if not req.title.strip():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Title must not be empty")
+
+    cursor.execute(
+        "INSERT INTO items (title, content, owner_username) VALUES (?, ?, ?)",
+        (req.title, req.content, "admin"),
+    )
     item_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -266,8 +279,14 @@ def list_todos():
 def create_todo(req: TodoCreateRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = f"INSERT INTO todos (title, description, is_completed, tags) VALUES ('{req.title}', '{req.description}', {int(req.is_completed)}, '{req.tags}')"
-    cursor.execute(query)
+    if not req.title.strip():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Title must not be empty")
+
+    cursor.execute(
+        "INSERT INTO todos (title, description, is_completed, tags) VALUES (?, ?, ?, ?)",
+        (req.title, req.description, int(req.is_completed), req.tags),
+    )
     todo_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -279,8 +298,11 @@ def create_todo(req: TodoCreateRequest):
 def search_todos(q: str):
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = f"SELECT * FROM todos WHERE title LIKE '%{q}%' OR description LIKE '%{q}%' ORDER BY id DESC"
-    cursor.execute(query)
+    pattern = f"%{q}%"
+    cursor.execute(
+        "SELECT * FROM todos WHERE title LIKE ? OR description LIKE ? ORDER BY id DESC",
+        (pattern, pattern),
+    )
     rows = [dict(row) for row in cursor.fetchall()]
     conn.close()
 
@@ -309,8 +331,7 @@ def delete_todo(
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = f"DELETE FROM todos WHERE id = {todo_id}"
-    cursor.execute(query)
+    cursor.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
     deleted_count = cursor.rowcount
     conn.commit()
     conn.close()
